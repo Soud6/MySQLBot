@@ -1,0 +1,129 @@
+import time
+import streamlit as st
+import google.generativeai as genai
+import mysql.connector
+import urllib.parse
+import re  # 🔹 Added to clean AI-generated SQL
+
+# ✅ Set Streamlit Page Config
+st.set_page_config(page_title="Chat with MySQL", page_icon="💬")
+
+# ✅ Hardcoded Google API Key
+GOOGLE_API_KEY = "AIzaSyBGJaVlgDXKnTrlqCbL9VH-Ap6Y2rrcUyc"
+genai.configure(api_key=GOOGLE_API_KEY)
+
+# ✅ Sidebar: Database Connection
+st.sidebar.subheader("Database Settings")
+db_host = st.sidebar.text_input("Host", value="localhost", key="db_host")
+db_port = st.sidebar.text_input("Port", value="3306", key="db_port")
+db_user = st.sidebar.text_input("User", value="root", key="db_user")
+db_password = st.sidebar.text_input("Password", type="password", key="db_password")
+db_name = st.sidebar.text_input("Database", value="itc", key="db_name")
+
+# ✅ Function to Initialize Database Connection
+def connect_database(user, password, host, port, database):
+    try:
+        encoded_password = urllib.parse.quote_plus(password)
+        connection = mysql.connector.connect(
+            host=host, port=port, user=user, password=password, database=database
+        )
+        st.session_state["db_connection"] = connection
+        st.success("✅ Database Connected Successfully!")
+    except mysql.connector.Error as e:
+        st.error(f"❌ Database Connection Failed: {e}")
+
+# ✅ Connect Button
+if st.sidebar.button("Connect"):
+    connect_database(db_user, db_password, db_host, db_port, db_name)
+
+# ✅ Function to Query Google Gemini for SQL
+def query_gemini(prompt, retries=3, delay=5):
+    for attempt in range(retries):
+        try:
+            model = genai.GenerativeModel("gemini-1.5-pro-latest")
+            response = model.generate_content(prompt)
+            return response.text.strip()  # ✅ Return AI-generated SQL query
+        except Exception as e:
+            st.warning(f"⚠️ API Error: {e}. Retrying in {delay} seconds...")
+            time.sleep(delay)
+
+    st.error("❌ Google Gemini API is unavailable. Please try again later.")
+    return None
+
+# ✅ Function to Clean AI-Generated SQL
+def clean_sql_query(ai_generated_sql):
+    """Removes Markdown code blocks and extra text from AI-generated SQL"""
+    cleaned_sql = re.sub(r"```sql|```", "", ai_generated_sql, flags=re.IGNORECASE).strip()
+    return cleaned_sql
+
+# ✅ Function to Fetch Database Schema (For Better AI Context)
+def get_table_schema():
+    """Retrieves database schema details for AI to generate accurate SQL queries"""
+    try:
+        db_conn = st.session_state["db_connection"]
+        cursor = db_conn.cursor(dictionary=True)
+
+        cursor.execute("SELECT TABLE_NAME FROM information_schema.tables WHERE table_schema = DATABASE()")
+        tables = [row["TABLE_NAME"] for row in cursor.fetchall()]
+
+        schema_info = ""
+        for table in tables:
+            cursor.execute(f"DESCRIBE {table}")
+            columns = [row["Field"] for row in cursor.fetchall()]
+            schema_info += f"\nTable: {table}\nColumns: {', '.join(columns)}\n"
+
+        return schema_info
+    except Exception as e:
+        st.warning(f"⚠️ Unable to fetch schema: {e}")
+        return "No schema available."
+
+# ✅ Streamlit Chat UI
+st.title("Chat with MySQL using AI 🤖")
+
+user_query = st.chat_input("Ask a question about your database...")
+
+if user_query and "db_connection" in st.session_state:
+    with st.chat_message("user"):
+        st.markdown(user_query)
+
+    # ✅ Fetch Database Schema
+    schema_details = get_table_schema()
+
+    # ✅ Convert User Query to SQL
+    sql_prompt = f"""
+    You are an SQL expert. Generate a MySQL query based on the question while following these rules:
+    1️⃣ Use only the necessary fields (do NOT select everything unless explicitly asked).
+    2️⃣ Ensure filtering and sorting are applied where relevant.
+    3️⃣ Use appropriate conditions to refine the search.
+    4️⃣ Make sure the query runs correctly in MySQL.
+
+    📌 **Database Schema:** 
+    {schema_details}
+    
+    Question: "{user_query}"
+    SQL Query:
+    """
+    raw_sql_query = query_gemini(sql_prompt)
+
+    if raw_sql_query:
+        sql_query = clean_sql_query(raw_sql_query)  # ✅ Clean the SQL Query
+
+        with st.chat_message("assistant"):
+            st.markdown(f"**Generated SQL Query:**\n```sql\n{sql_query}\n```")
+
+        # ✅ Execute SQL Query
+        try:
+            db_conn = st.session_state["db_connection"]
+            cursor = db_conn.cursor()
+            cursor.execute(sql_query)
+            response = cursor.fetchall()
+            cursor.close()
+
+            if response:
+                st.write("### ✅ Query Result:")
+                st.dataframe(response)  # Display results in table format
+            else:
+                st.info("ℹ️ No matching records found.")
+
+        except mysql.connector.Error as e:
+            st.error(f"❌ SQL Execution Error: {e}")
